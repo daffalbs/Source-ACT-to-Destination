@@ -1,5 +1,7 @@
+// src/modules/Discord.ts
 import dotenv from 'dotenv';
 dotenv.config();
+
 import process from "node:process";
 import { setInterval } from "node:timers";
 import { cleanMessage } from "../utils/functions/cleanMessage.js";
@@ -22,9 +24,8 @@ import type {
     WebsocketTypes,
 } from "../typings/index.js";
 import logger from "../utils/logger.js";
-// CommonJS syntax
 
-// Create a Map to store channel-to-webhook mappings
+// Parse channel and webhook URLs from env
 const channelWebhookMap = new Map();
 const channelsId = [...new Set((process.env.CHANNELS_ID || "")
     .split(",")
@@ -34,7 +35,6 @@ const webhooksUrl = (process.env.WEBHOOKS_URL || "")
     .split(",")
     .map((url) => url.trim());
 
-// Initialize the channel-webhook mapping
 channelsId.forEach((channelId, index) => {
     if (index < webhooksUrl.length) {
         channelWebhookMap.set(channelId, webhooksUrl[index]);
@@ -69,7 +69,7 @@ export const executeWebhook = async (things: Things): Promise<void> => {
         });
     } catch (error) {
         logger.error('Failed to execute webhook:', error instanceof Error ? error.message : String(error));
-        throw error;
+        // Do not throw to prevent crash loop
     }
 };
 
@@ -90,100 +90,69 @@ export const listen = (): void => {
 
         ws = new Websocket(resumeData.resumeGatewayUrl);
 
-        // Wait for connection to be established before sending
         ws.on('open', () => {
-            ws.send(
-                JSON.stringify({
-                    op: 6,
-                    d: {
-                        token: discordToken,
-                        // eslint-disable-next-line typescript/naming-convention
-                        session_id: resumeData.sessionId,
-                        seq: resumeData.seq,
-                    },
-                }),
-            );
+            ws.send(JSON.stringify({
+                op: 6,
+                d: {
+                    token: discordToken,
+                    session_id: resumeData.sessionId,
+                    seq: resumeData.seq,
+                },
+            }));
         });
     } else {
         ws = new Websocket("wss://gateway.discord.gg/?v=10&encoding=json");
     }
 
-    ws.on("open", () => {
-        logger.info("Connected to the Discord WSS.");
-    });
-
+    ws.on("open", () => logger.info("Connected to Discord WSS."));
     ws.on("close", () => {
-        logger.warning("WebSocket connection closed. Attempting to reconnect...");
-        setTimeout(() => {
-            listen();
-        }, 5000);
+        logger.warning("WebSocket closed. Reconnecting...");
+        setTimeout(() => listen(), 5000);
     });
-
     ws.on("error", (error) => {
         logger.error("WebSocket error:", error);
-        setTimeout(() => {
-            listen();
-        }, 5000);
+        setTimeout(() => listen(), 5000);
     });
+
     ws.on("message", async (data: string) => {
-        const payload: GatewayReceivePayload = JSON.parse(
-            data,
-        ) as GatewayReceivePayload;
+        const payload: GatewayReceivePayload = JSON.parse(data);
         const { op, d, s, t } = payload;
         resumeData.seq = s ?? resumeData.seq;
 
         switch (op) {
             case GatewayOpcodes.Hello:
-                logger.info("Hello event received. Starting heartbeat...");
-                ws.send(
-                    JSON.stringify({
-                        op: 1,
-                        d: s,
-                    }),
-                );
+                logger.info("Hello received. Starting heartbeat...");
+                ws.send(JSON.stringify({ op: 1, d: s }));
                 setInterval(() => {
-                    ws.send(
-                        JSON.stringify({
-                            op: 1,
-                            d: s,
-                        }),
-                    );
-
+                    ws.send(JSON.stringify({ op: 1, d: s }));
                     logger.debug("Heartbeat sent.");
                 }, d.heartbeat_interval);
+                break;
 
-                logger.info("Heartbeat started.");
-                break;
             case GatewayOpcodes.Heartbeat:
-                logger.debug("Discord requested an immediate heartbeat.");
-                ws.send(
-                    JSON.stringify({
-                        op: 1,
-                        d: s,
-                    }),
-                );
-                logger.debug("Heartbeat sent.");
+                logger.debug("Immediate heartbeat requested.");
+                ws.send(JSON.stringify({ op: 1, d: s }));
                 break;
+
             case GatewayOpcodes.HeartbeatAck:
                 if (!authenticated) {
                     authenticated = true;
-                    ws.send(
-                        JSON.stringify({
-                            op: 2,
-                            d: {
-                                token: discordToken,
-                                properties: {
-                                    os: "android",
-                                    browser: "dcm",
-                                    device: "dcm",
-                                },
-                                intents: Number("37408"),
+                    ws.send(JSON.stringify({
+                        op: 2,
+                        d: {
+                            token: discordToken,
+                            properties: {
+                                os: "android",
+                                browser: "dcm",
+                                device: "dcm",
                             },
-                        }),
-                    );
+                            intents: Number("37408"),
+                        },
+                    }));
                     logger.info("Authenticating...");
                 }
                 break;
+
             case GatewayOpcodes.Dispatch:
                 if (t === GatewayDispatchEvents.Ready) {
                     resumeData = {
@@ -191,9 +160,7 @@ export const listen = (): void => {
                         resumeGatewayUrl: `${d.resume_gateway_url}?v=10&encoding=json`,
                         seq: s,
                     };
-                    logger.info(
-                        `Logged in as ${d.user.username}${d.user.discriminator && d.user.discriminator !== "0" ? `#${d.user.discriminator}` : ""}`,
-                    );
+                    logger.info(`Logged in as ${d.user.username}`);
                 }
 
                 if (
@@ -202,90 +169,81 @@ export const listen = (): void => {
                     !processedMessages.has(d.id)
                 ) {
                     processedMessages.add(d.id);
-                    // Only use the first occurrence of the channel
-                    const index = channelsId.indexOf(d.channel_id);
-                    if (index !== -1 && index < webhooksUrl.length) {
-                        const webhookUrl = webhooksUrl[index];
-                        let ext = "jpg";
-                        
 
-                        const {
-                            content,
-                            attachments,
-                            embeds,
-                            sticker_items,
-                            author,
-                        } = d;
-                        const {
-                            avatar,
-                            username,
-                            discriminator: discriminatorRaw,
-                            id,
-                            bot,
-                            global_name
-                        } = author;
-                        let discriminator: string | null = discriminatorRaw;
+                    const webhookUrl = channelWebhookMap.get(d.channel_id);
+                    if (!webhookUrl) return;
 
-                        discriminator =
-                            discriminator === "0" ? null : `#${discriminator}`;
+                    let ext = "jpg";
+                    const {
+                        content,
+                        attachments,
+                        embeds,
+                        sticker_items,
+                        author,
+                    } = d;
 
-                        if (avatar?.startsWith("a_") ?? false) ext = "gif";
+                    const {
+                        avatar,
+                        username,
+                        discriminator: discriminatorRaw,
+                        id,
+                        bot,
+                        global_name
+                    } = author;
 
-                        const profile: SenderProfile = {
-                            id,
-                            username,
-                            discriminator,
-                            avatar,
-                            bot: !!bot,
-                            globalName: global_name
-                        };
+                    const discriminator =
+                        discriminatorRaw === "0" ? null : `#${discriminatorRaw}`;
 
-                        const things: Things = {
-                            profile,
-                            avatarURL:
-                                (avatar ?? "")
-                                    ? `https://cdn.discordapp.com/avatars/${id}/${avatar}.${ext}`
-                                    : `https://cdn.discordapp.com/embed/avatars/${(BigInt(id) >> 22n) % 6n}.png`,
-                            content: content ? cleanMessage(content) : "** **\n",
-                            url: webhookUrl,
-                            username: `${username}${discriminator ?? ""}`, //Removed bot indicator
-                        };
+                    if (avatar?.startsWith("a_")) ext = "gif";
 
-                        // Always use source profile
+                    const profile: SenderProfile = {
+                        id,
+                        username,
+                        discriminator,
+                        avatar,
+                        bot: !!bot,
+                        globalName: global_name
+                    };
 
-                        if (embeds.length > 0) {
-                            things.embeds = embeds;
-                        } else if (sticker_items) {
-                            things.files = sticker_items.map(
-                                (a: APIStickerItem) =>
-                                    `https://media.discordapp.net/stickers/${a.id}.webp`,
-                            );
-                        } else if (attachments.length > 0 && enableAttachment) {
-                            // Forward all original attachments with metadata
-                            things.files = attachments.map((a: APIAttachment) => ({
-                                attachment: a.url,
-                                name: a.filename,
-                                description: a.description
-                            }));
-                        }
-                        await executeWebhook(things);
+                    const things: Things = {
+                        profile,
+                        avatarURL: avatar
+                            ? `https://cdn.discordapp.com/avatars/${id}/${avatar}.${ext}`
+                            : `https://cdn.discordapp.com/embed/avatars/${(BigInt(id) >> 22n) % 6n}.png`,
+                        content: content ? cleanMessage(content) : "** **\n",
+                        url: webhookUrl,
+                        username: `${username}${discriminator ?? ""}`,
+                    };
+
+                    if (embeds.length > 0) {
+                        things.embeds = embeds;
+                    } else if (sticker_items) {
+                        things.files = sticker_items.map(
+                            (a: APIStickerItem) =>
+                                `https://media.discordapp.net/stickers/${a.id}.webp`
+                        );
+                    } else if (attachments.length > 0 && enableAttachment) {
+                        things.files = attachments.map((a: APIAttachment) => ({
+                            attachment: a.url,
+                            name: a.filename,
+                            description: a.description
+                        }));
                     }
+
+                    await executeWebhook(things);
                 }
                 break;
+
             case GatewayOpcodes.Reconnect:
-                logger.info("Reconnecting...");
+                logger.info("Reconnect requested.");
                 listen();
                 break;
+
             case GatewayOpcodes.InvalidSession:
                 logger.warning("Invalid session.");
-                if (d) {
-                    logger.info("Can retry, reconnecting...");
-                    listen();
-                } else {
-                    logger.error("Cannot retry, exiting...");
-                    process.exit(1);
-                }
+                d ? listen() : process.exit(1);
                 break;
+
             default:
                 logger.warning("Unhandled opcode:", op);
                 break;
