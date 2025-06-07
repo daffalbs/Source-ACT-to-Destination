@@ -8,7 +8,7 @@ import { setInterval } from "node:timers";
 import Websocket from "ws";
 import {
   GatewayDispatchEvents,
-  GatewayOpcodes,
+  GatewayOpcodes as Opcodes,
   WebhookClient,
 } from "discord.js";
 
@@ -23,8 +23,6 @@ import type { DiscordWebhook, Things, WebsocketTypes } from "../typings/index.js
 import { cleanMessage } from "../utils/functions/cleanMessage.js";
 import { enableAttachment } from "../utils/env.js";
 import logger from "../utils/logger.js";
-
-// === Environment Setup ===
 
 const discordToken = process.env.DISCORD_TOKEN;
 const enableBotIndicator = process.env.ENABLE_BOT_INDICATOR === "yes";
@@ -47,8 +45,6 @@ channelsId.forEach((channelId, index) => {
 });
 
 const processedMessages = new Set<string>();
-
-// === Webhook Execution ===
 
 export const executeWebhook = async (things: Things): Promise<void> => {
   try {
@@ -73,8 +69,6 @@ export const executeWebhook = async (things: Things): Promise<void> => {
   }
 };
 
-// === WebSocket Setup ===
-
 let ws: WebsocketTypes;
 let resumeData = {
   sessionId: "",
@@ -97,7 +91,7 @@ export const listen = (): void => {
       logger.info("Resuming session...");
       ws.send(
         JSON.stringify({
-          op: GatewayOpcodes.Resume,
+          op: 6, // Resume opcode
           d: {
             token: discordToken,
             session_id: resumeData.sessionId,
@@ -125,20 +119,18 @@ export const listen = (): void => {
     resumeData.seq = s ?? resumeData.seq;
 
     switch (op) {
-      case GatewayOpcodes.Hello:
+      case 10: // Hello
         logger.info("Hello received. Starting heartbeat...");
         ws.send(JSON.stringify({ op: 1, d: s }));
-        setInterval(() => {
-          ws.send(JSON.stringify({ op: 1, d: s }));
-        }, d.heartbeat_interval);
+        setInterval(() => ws.send(JSON.stringify({ op: 1, d: s })), d.heartbeat_interval);
         break;
 
-      case GatewayOpcodes.HeartbeatAck:
+      case 11: // HeartbeatAck
         if (!authenticated) {
           authenticated = true;
           ws.send(
             JSON.stringify({
-              op: GatewayOpcodes.Identify,
+              op: 2, // Identify
               d: {
                 token: discordToken,
                 properties: {
@@ -154,8 +146,8 @@ export const listen = (): void => {
         }
         break;
 
-      case GatewayOpcodes.Dispatch:
-        if (t === GatewayDispatchEvents.Ready) {
+      case 0: // Dispatch
+        if (t === "READY") {
           resumeData = {
             sessionId: d.session_id,
             resumeGatewayUrl: `${d.resume_gateway_url}?v=10&encoding=json`,
@@ -164,11 +156,7 @@ export const listen = (): void => {
           logger.info(`Logged in as ${d.user.username}`);
         }
 
-        if (
-          t === GatewayDispatchEvents.MessageCreate &&
-          channelsId.includes(d.channel_id) &&
-          !processedMessages.has(d.id)
-        ) {
+        if (t === "MESSAGE_CREATE" && channelsId.includes(d.channel_id) && !processedMessages.has(d.id)) {
           processedMessages.add(d.id);
 
           const webhookUrl = channelWebhookMap.get(d.channel_id);
@@ -203,7 +191,6 @@ export const listen = (): void => {
             content: content ? cleanMessage(content) : "** **",
           };
 
-          // Prioritize in order: embeds, stickers, attachments
           if (embeds.length > 0) {
             things.embeds = embeds;
           } else if (sticker_items.length > 0) {
@@ -222,12 +209,12 @@ export const listen = (): void => {
         }
         break;
 
-      case GatewayOpcodes.Reconnect:
+      case 7: // Reconnect
         logger.info("Reconnect requested by server.");
         listen();
         break;
 
-      case GatewayOpcodes.InvalidSession:
+      case 9: // Invalid Session
         logger.warning("Invalid session.");
         d ? listen() : process.exit(1);
         break;
